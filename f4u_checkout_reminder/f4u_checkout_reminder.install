@@ -1,0 +1,41 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function f4u_checkout_reminder_schema() {
+  $schema = array();
+
+  $schema['f4u_checkout_reminder'] = array(
+    'fields' => array(
+      'order_id' => array(
+        'description' => 'The primary identifier for an order.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'email' => array(
+        'description' => 'Email.',
+        'type' => 'text',
+        'size' => 'small',
+        'not null' => FALSE,
+        'size' => 'medium',
+      ),
+      'date' => array(
+        'description' => 'Date.',
+        'type' => 'text',
+        'not null' => FALSE,
+        'size' => 'small',
+      ),
+      'status' => array(
+        'description' => 'Status.',
+        'type' => 'text',
+        'not null' => FALSE,
+        'size' => 'small',
+      ),
+    ),
+    'primary key' => array('order_id'),
+  );
+
+  return $schema;
+}

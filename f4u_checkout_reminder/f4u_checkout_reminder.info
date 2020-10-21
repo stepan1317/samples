@@ -1,0 +1,4 @@
+name = Fun4You Checkout Reminder
+description = System to send mails for checkout reminder.
+core = 7.x
+package = Fun4You

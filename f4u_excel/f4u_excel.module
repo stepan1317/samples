@@ -1,0 +1,241 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function f4u_excel_menu() {
+  $items['admin/config/fun4you/excel_invoice_export'] = [
+    'title' => t('Export invoices to Excel'),
+    'description' => t('Settings for export invoices to excel document.'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['f4u_excel_invoice_export_form'],
+    'access arguments' => ['administer site configuration'],
+  ];
+  $items['admin/config/fun4you/inkasso_orders_export'] = [
+    'title' => t('Export inkasso orders to Excel'),
+    'description' => t('Settings for export inkasso orders to excel document.'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['f4u_excel_inkasso_orders_export_form'],
+    'access arguments' => ['administer site configuration'],
+    'file' => 'f4u_excel.order.inc',
+  ];
+
+  return $items;
+}
+
+/**
+ * @param $form
+ * @param $form_state
+ *
+ * @return mixed
+ */
+function f4u_excel_invoice_export_form($form, &$form_state) {
+  $form = [];
+
+  $form['filters']['startDate'] = [
+    '#type' => 'date_popup',
+    '#date_format' => 'd-m-Y',
+    '#title' => t('Start date:'),
+    '#date_label_position' => 'none',
+  ];
+  $form['filters']['endDate'] = [
+    '#type' => 'date_popup',
+    '#date_format' => 'd-m-Y',
+    '#title' => t('End date:'),
+    '#date_label_position' => 'none',
+  ];
+  $form['actions']['submit'] = [
+    '#type' => 'submit',
+    '#value' => t('Export invoices'),
+  ];
+
+  $custom_form = system_settings_form($form);
+
+  $custom_form['actions']['submit'] = [
+    '#type' => 'submit',
+    '#value' => t('Export invoice'),
+  ];
+
+  $custom_form['#submit'][] = 'f4u_excel_invoice_export_form_submit';
+  return $custom_form;
+}
+
+/**
+ * @param $form
+ * @param $form_state
+ */
+function f4u_excel_invoice_export_form_validate($form, &$form_state) {
+  if (strtotime($form_state['input']['startDate']['date']) > strtotime($form_state['input']['endDate']['date'])) {
+    form_set_error('time', t('End  must be greater than the start date.'));
+  }
+}
+
+/**
+ * Callback for hook_menu.
+ *
+ * @return string
+ * @throws \PhpOffice\PhpSpreadsheet\Exception
+ * @throws \PhpOffice\PhpSpreadsheet\Writer\Exception
+ */
+function f4u_excel_invoice_export_form_submit($form, &$form_state) {
+
+  require_once f4ucoupon_get_library('PhpSpreadsheet') . '/src/Bootstrap.php';
+
+  $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+
+  $spreadsheet->setActiveSheetIndex(0);
+  $spreadsheet->getActiveSheet()->setCellValue('A1', 'Order date');
+  $spreadsheet->getActiveSheet()->setCellValue('B1', '№ Order');
+  $spreadsheet->getActiveSheet()->setCellValue('C1', 'Adress');
+  $spreadsheet->getActiveSheet()->setCellValue('D1', '№ Invoice');
+  $spreadsheet->getActiveSheet()->setCellValue('E1', '№ Customer');
+  $spreadsheet->getActiveSheet()->setCellValue('F1', 'Product');
+  $spreadsheet->getActiveSheet()->setCellValue('G1', 'Price');
+  $spreadsheet->getActiveSheet()->setCellValue('H1', 'Shipping costs');
+  $spreadsheet->getActiveSheet()->setCellValue('I1', 'Payment information');
+
+  $dates = [
+    strtotime(date('Y-m-d', strtotime($form_state['input']['startDate']['date']))),
+    strtotime(date('Y-m-d', strtotime($form_state['input']['endDate']['date'] . '+ 1 day'))),
+  ];
+
+  $query = db_select('commerce_order', 'co');
+  $query->innerJoin('commerce_invoice', 'ci', 'ci.order_id = co.order_id');
+  $query->fields('co', ['order_id']);
+  $query->condition('ci.created', $dates, 'BETWEEN');
+  $invoices = $query->execute();
+
+
+  foreach ($invoices->fetchAll() as $key => $value) {
+
+    $order = entity_metadata_wrapper('commerce_order', $value->order_id);
+    $invoice = commerce_invoice_load_by_order_id($value->order_id);
+
+    $address = '';
+    if ($order->__isset('commerce_customer_shipping')) {
+      if ($order->commerce_customer_shipping->__isset('commerce_customer_address')) {
+
+        if ($order->commerce_customer_shipping->commerce_customer_address->__isset('name_line')) {
+          $address .= $order->commerce_customer_shipping->commerce_customer_address->name_line->value() . ' ';
+        }
+        if ($order->commerce_customer_shipping->commerce_customer_address->__isset('thoroughfare')) {
+          $address .= $order->commerce_customer_shipping->commerce_customer_address->thoroughfare->value() . ' ';
+        }
+        if ($order->commerce_customer_shipping->commerce_customer_address->__isset('postal_code')) {
+          $address .= $order->commerce_customer_shipping->commerce_customer_address->postal_code->value() . ' ';
+        }
+        if ($order->commerce_customer_shipping->commerce_customer_address->__isset('locality')) {
+          $address .= $order->commerce_customer_shipping->commerce_customer_address->locality->value();
+        }
+      }
+    }
+
+    $price = commerce_currency_format($order->commerce_order_total->amount->value(), 'EUR');
+
+    $query = new EntityFieldQuery;
+    $payment = $query
+      ->entityCondition('entity_type', 'commerce_payment_transaction')
+      ->propertyCondition('order_id', $value->order_id)
+      ->propertyOrderBy('transaction_id', 'DESC')
+      ->range(0, 1)
+      ->execute();
+
+    $payment_info = '';
+    if (count($payment) != 0) {
+      $payment_info = f4u_excel_payment_information_display($payment['commerce_payment_transaction'][array_keys($payment['commerce_payment_transaction'])[0]]->payment_method, $invoice->invoice_id, $value->order_id, $payment['commerce_payment_transaction'][array_keys($payment['commerce_payment_transaction'])[0]]->transaction_id);
+    }
+
+    $invoice_id = '';
+    if (isset($invoice->invoice_id) && $invoice->invoice_id !== NULL) {
+      $invoice_id = $invoice->invoice_id;
+    }
+
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(1, $key + 2, date('d.m.y', $invoice->created));
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(2, $key + 2, $value->order_id);
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(3, $key + 2, $address);
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(4, $key + 2, $invoice_id);
+
+    if ($order->__isset('commerce_customer_shipping')) {
+      if ($order->commerce_customer_shipping->__isset('profile_id')) {
+        $spreadsheet->getActiveSheet()
+          ->setCellValueByColumnAndRow(5, $key + 2, $order->commerce_customer_shipping->profile_id->value());
+      }
+    }
+
+    if ($order->commerce_line_items[0]->__isset('commerce_product')) {
+      $spreadsheet->getActiveSheet()
+        ->setCellValueByColumnAndRow(6, $key + 2, $order->commerce_line_items[0]->commerce_product->title->value());
+    }
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(7, $key + 2, $price);
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(8, $key + 2, f4u_order_get_shipping_cost_for_order($value->order_id));
+    $spreadsheet->getActiveSheet()
+      ->setCellValueByColumnAndRow(9, $key + 2, $payment_info);
+
+  }
+
+  foreach (range('A', 'I') as $columnID) {
+    $spreadsheet->getActiveSheet()->getColumnDimension($columnID)
+      ->setAutoSize(TRUE);
+  }
+
+  $writer = \PhpOffice\PhpSpreadsheet\IOFactory::createWriter($spreadsheet, "Xls");
+
+  $excel_uri = 'public://excel_invoices/';
+  $file_name = 'invoice_' . date('y_m_d', time()) . '.xls';
+
+  if (!drupal_realpath($excel_uri)) {
+    $writer->save($excel_uri . $file_name);
+  }
+  else {
+    drupal_mkdir($excel_uri);
+    $writer->save($excel_uri . $file_name);
+  }
+
+  header("Content-type: application/xls");
+  header("Content-disposition: attachment; filename=" . $file_name);
+  header("Content-type: application/xls");
+  readfile($excel_uri . $file_name);
+
+  exit;
+}
+
+/**
+ * @param $method
+ * @param $invoice_id
+ * @param $order_id
+ * @param $transaction_id
+ *
+ * @return string
+ */
+function f4u_excel_payment_information_display($method, $invoice_id, $order_id, $transaction_id) {
+
+  $payment_method_information = variable_get('f4uinvoice_payment_information_' . $method . '_settings', [
+    'value' => '',
+    'format' => 'filtered_html',
+  ]);
+
+  $token_replace = ['payment-method' => commerce_payment_method_instance_load($method . '|commerce_payment_' . $method)];
+
+  if (!empty($invoice_id)) {
+    $token_replace['commerce-invoice'] = commerce_invoice_load($invoice_id);
+  }
+  if (!empty($order_id)) {
+    $token_replace['commerce-order'] = commerce_order_load($order_id);
+  }
+  if (!empty($transaction_id)) {
+    $token_replace['commerce-payment-transaction'] = commerce_payment_transaction_load($transaction_id);
+  }
+
+  $output = token_replace($payment_method_information['value'], $token_replace);
+
+  $output = trim($output);
+  $output = strip_tags($output);
+
+  return $output;
+}

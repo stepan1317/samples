@@ -1,0 +1,314 @@
+<?php
+
+require 'sites/all/libraries/PHPMailer/vendor/autoload.php';
+
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\SMTP;
+use PHPMailer\PHPMailer\Exception;
+
+
+/**
+ * Implements hook_menu().
+ *
+ * @return array
+ */
+function f4u_checkout_reminder_menu() {
+  $items = [];
+
+  $items['admin/config/checkout_reminder/orders'] = [
+    'title' => 'Checkout reminder',
+    'description' => 'List of checkout reminder orders',
+    'page callback' => 'f4u_checkout_reminder_table',
+    'access arguments' => ['access content'],
+    'type' => MENU_CALLBACK,
+  ];
+
+  $items['f4u_checkout_reminder/%'] = [
+    'title' => 'Resend reminder checkout',
+    'page callback' => 'f4u_checkout_reminder_resend',
+    'page arguments' => [1],
+    'access arguments' => ['access content'],
+    'type' => MENU_CALLBACK,
+  ];
+
+  $items['fun4you-checkout-reminder-control'] = [
+    'title' => 'Checkout reminder cron',
+    'page callback' => 'f4u_checkout_reminder_control',
+    'access callback' => TRUE,
+  ];
+
+  return $items;
+}
+
+/**
+ * Custom callback for select valid emails.
+ */
+function _f4u_checkout_reminder_order_select() {
+  $count = db_select('f4u_checkout_reminder', 'fcr')
+    ->countQuery()
+    ->execute()
+    ->fetchField();
+
+  if ($count == 0) {
+    $day = strtotime(" - 14 days");
+  }
+  else {
+    $day = strtotime(" - 1 days");
+  }
+
+  $orders = db_select('commerce_order', 'co')
+    ->fields('co', ['order_id', 'mail', 'created', 'status'])
+    ->condition('co.status', [
+      'completed',
+      'commerce_paymentreceived',
+      'shipping_done',
+      'pending',
+      'final_reminder',
+      'canceled',
+      'musterbestellung',
+      'cancelled_fun4you',
+      'collector_agency',
+      'checkout_payment',
+      'locked_fun4you',
+      'third_reminder',
+      'first_reminder',
+      'cancelled_customer',
+      'second_reminder',
+    ], 'NOT IN')
+    ->condition('co.mail', '%' . db_like('muster') . '%', 'NOT LIKE')
+    ->condition('co.mail', '', '!=')
+    ->condition('co.created', $day, '>')
+    ->execute()
+    ->fetchAll();
+
+  $order_for_sending = [];
+
+  foreach ($orders as $order) {
+    $next_orders = db_select('commerce_order', 'co')
+      ->fields('co', ['order_id', 'mail', 'created', 'status'])
+      ->condition('co.status', [
+        'completed',
+        'commerce_paymentreceived',
+        'shipping_done',
+        'pending',
+        'final_reminder',
+        'canceled',
+        'musterbestellung',
+        'cancelled_fun4you',
+        'collector_agency',
+        'locked_fun4you',
+        'third_reminder',
+        'first_reminder',
+        'cancelled_customer',
+        'second_reminder',
+      ], 'IN')
+      ->condition('co.mail', $order->mail)
+      ->condition('co.created', $day, '>')
+      ->execute()
+      ->fetchAll();
+
+    if (count($next_orders) == 0) {
+      $flag = TRUE;
+      $order_wrapper = entity_metadata_wrapper('commerce_order', $order->order_id);
+      foreach ($order_wrapper->commerce_line_items->value() as $line_item) {
+        if ($line_item->type == 'commerce_coupon') {
+          $flag = FALSE;
+        }
+      }
+      if ($flag) {
+        $order_for_sending[] = $order;
+      }
+    }
+  }
+
+  return $order_for_sending;
+}
+
+/**
+ * Custom callback for sending emails reminder.
+ */
+function _f4u_checkout_reminder_email_sending($orders) {
+  foreach ($orders as $order) {
+    $email = db_select('f4u_checkout_reminder', 'fcr')
+      ->fields('fcr', ['email'])
+      ->condition('fcr.email', $order->mail)
+      ->execute()
+      ->fetchField();
+
+    if ($email == '') {
+      $mail = new PHPMailer(TRUE);
+
+      try {
+
+        $gender = '';
+        $name = '';
+        $order_wrapper = entity_metadata_wrapper('commerce_order', $order->order_id);
+        if ($order_wrapper->commerce_customer_billing->value() != '' && $order_wrapper->commerce_customer_billing->field_name_prefix->value() != '' && $order_wrapper->commerce_customer_billing->commerce_customer_address->value()['name_line'] != '') {
+          $gender = $order_wrapper->commerce_customer_billing->field_name_prefix->name->value();
+          $name = $order_wrapper->commerce_customer_billing->commerce_customer_address->value()['name_line'];
+        }
+
+        $mail->SMTPDebug = SMTP::DEBUG_SERVER;
+        $mail->isSMTP();
+        $mail->Host = HOST;
+        $mail->SMTPAuth = TRUE;
+        $mail->Username = USERNAME;
+        $mail->Password = variable_get('smtp_password', '');
+        $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port = 587;
+
+        $mail->CharSet = 'utf-8';
+        $mail->setFrom(USERNAME, 'Fun4You Erlebnisgeschenke');
+        $mail->addAddress($order->mail);
+        $mail->isHTML(TRUE);
+        $mail->Subject = 'Ihre Bestellung bei Fun4You';
+        $mail_body = file_get_contents('http://' . $_SERVER['HTTP_HOST'] . "/sites/all/modules/custom/f4u_checkout_reminder/templates/mail_template.php?name=" . urlencode($name) . "&gender=$gender");
+        $mail->Body = $mail_body;
+
+        $mail->send();
+
+        dpm('Message has been sent');
+
+        db_insert('f4u_checkout_reminder')
+          ->fields(['order_id', 'email', 'date', 'status'])
+          ->values([$order->order_id, $order->mail, $order->created, '1'])
+          ->execute();
+
+        $order_wrapper = entity_metadata_wrapper('commerce_order', $order->order_id);
+        $order_wrapper->field_order_reminder_status->set(1);
+        $order_wrapper->save();
+
+      } catch (Exception $e) {
+        dpm("Message could not be sent. Mailer Error: {$mail->ErrorInfo}");
+
+        db_insert('f4u_checkout_reminder')
+          ->fields(['order_id', 'email', 'date', 'status'])
+          ->values([$order->order_id, $order->mail, $order->created, '0'])
+          ->execute();
+      }
+    }
+  }
+}
+
+/**
+ * Custom callback for delete expired emails.
+ */
+function _f4u_checkout_reminder_delete_expired_emails() {
+  $day = strtotime(" - 14 days");
+
+  db_delete('f4u_checkout_reminder')
+    ->condition('date', $day, '<')
+    ->execute();
+}
+
+/**
+ * Build page with table.
+ */
+function f4u_checkout_reminder_table() {
+  $header = [
+    'Order Id',
+    'Email',
+    'Date',
+    'Status',
+    'Operations',
+  ];
+  $rows = [];
+  $query = db_select('f4u_checkout_reminder', 't')->fields('t', [
+    'order_id',
+    'email',
+    'date',
+    'status',
+  ])->execute();
+
+  while ($value = $query->fetchAssoc()) {
+    $date = format_date($value['date'], 'custom', 'Y-m-d - H:i');
+    $rows[] = [
+      l(t('Commerce order: @id', ['@id' => $value['order_id']]), 'admin/commerce/orders/' . $value['order_id']),
+      $value['email'],
+      $date,
+      $value['status'] ? 'Sent' : 'Not sent',
+      $value['status'] ? '' : l('Resend', 'f4u_checkout_reminder/' . $value['email']),
+    ];
+  }
+
+  if (!count($rows)) {
+    return t('There are no orders yet. Please create one.');
+  }
+  else {
+    return theme('table', ['header' => $header, 'rows' => $rows]);
+  }
+}
+
+/**
+ * Mail resend callback.
+ *
+ * @param $mail
+ */
+function f4u_checkout_reminder_resend($email) {
+
+  $mail = new PHPMailer(TRUE);
+
+  try {
+
+    $order_id = db_select('f4u_checkout_reminder', 'fcr')
+      ->fields('fcr', ['order_id', 'email'])
+      ->condition('fcr.email', $email)
+      ->execute()
+      ->fetchAll();
+
+    $gender = '';
+    $name = '';
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order_id[0]->order_id);
+    if ($order_wrapper->commerce_customer_billing->value() != '' && $order_wrapper->commerce_customer_billing->field_name_prefix->value() != '' && $order_wrapper->commerce_customer_billing->commerce_customer_address->value()['name_line'] != '') {
+      $gender = $order_wrapper->commerce_customer_billing->field_name_prefix->name->value();
+      $name = $order_wrapper->commerce_customer_billing->commerce_customer_address->value()['name_line'];
+    }
+
+    $mail->SMTPDebug = SMTP::DEBUG_SERVER;
+    $mail->isSMTP();
+    $mail->Host = HOST;
+    $mail->SMTPAuth = TRUE;
+    $mail->Username = USERNAME;
+    $mail->Password = variable_get('smtp_password', '');
+    $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+    $mail->Port = 587;
+
+    $mail->CharSet = 'utf-8';
+    $mail->setFrom(USERNAME, 'Fun4You Erlebnisgeschenke');
+    $mail->addAddress($email);
+    $mail->isHTML(TRUE);
+    $mail->Subject = 'Ihre Bestellung bei Fun4You';
+    $mail_body = file_get_contents('http://' . $_SERVER['HTTP_HOST'] . "/sites/all/modules/custom/f4u_checkout_reminder/templates/mail_template.php?name=" . urlencode($name) . "&gender=$gender");
+    $mail->Body = $mail_body;
+
+    $mail->send();
+
+    dpm('Message has been sent');
+
+    db_update('f4u_checkout_reminder')
+      ->fields(['status' => '1'])
+      ->condition('email', $email)
+      ->execute();
+
+
+    $order_wrapper->field_order_reminder_status->set(1);
+    $order_wrapper->save();
+
+  } catch (Exception $e) {
+    dpm("Message could not be sent. Mailer Error: {$mail->ErrorInfo}");
+  }
+
+  drupal_goto('admin/config/checkout_reminder/orders');
+}
+
+
+/**
+ * Callback for sending checkout reminder.
+ */
+function f4u_checkout_reminder_control() {
+  if (isset($_GET['cron_key']) && variable_get('cron_key', 'drupal') === $_GET['cron_key']) {
+    _f4u_checkout_reminder_delete_expired_emails();
+    $orders = _f4u_checkout_reminder_order_select();
+    _f4u_checkout_reminder_email_sending($orders);
+  }
+}

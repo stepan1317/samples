@@ -1,0 +1,6 @@
+name = Fun4You Excel
+description = Fun4You Excel export.
+core = 7.x
+package = Fun4You
+
+dependencies[] = libraries
